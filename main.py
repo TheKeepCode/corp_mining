@@ -5,8 +5,8 @@ import json
 import uuid
 import time
 from urllib.parse import urlencode, urlparse, parse_qs
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, UTC
+import csv
 
 ## FUNCTIONS
 
@@ -16,10 +16,7 @@ def load_cache(cache_file):
         with open(cache_file, 'r') as f:
             return json.load(f)
     else:
-        return {
-            "characters": [],
-            "ore_type": []
-        }
+        return {"characters": [], "ore_type": []}  # Initialize both sections in the cache
 
 # Function - Save Cache
 def save_cache(cache, cache_file):
@@ -29,7 +26,7 @@ def save_cache(cache, cache_file):
 # Function - Cache Character ID
 def get_character_name(character_id, headers, cache_file="cache.json"):
     cache = load_cache(cache_file)
-    today = datetime.utcnow().date()
+    today = datetime.now(UTC).date()
 
     # Search for existing character in cache
     for char in cache["characters"]:
@@ -66,19 +63,77 @@ def get_character_name(character_id, headers, cache_file="cache.json"):
         })
 
     # Write back to cache file immediately
-    with open(cache_file, 'w') as f:
-        json.dump(cache, f, indent=4)
+    save_cache(cache, cache_file)
+
+    return name
+
+# Function - Cache Ore Type
+def get_ore_name(ore_id, headers, cache_file="cache.json"):
+    cache = load_cache(cache_file)
+    today = datetime.now(UTC).date()
+
+    # Search for existing ore type in cache
+    for ore in cache["ore_type"]:
+        if ore["id"] == ore_id:
+            last_updated = datetime.strptime(ore["last_updated"], "%Y-%m-%d").date()
+            if (today - last_updated).days < 180:
+                return ore["name"]
+            break  # Found but stale, will update below
+
+    # Query ESI for ore type
+    esi_url = f"{ESI_BASE}/universe/types/{ore_id}/"
+    try:
+        resp = requests.get(esi_url, headers=headers)
+        resp.raise_for_status()
+        ore_data = resp.json()
+        name = ore_data["name"]
+    except Exception as e:
+        print(f"❌ Failed to get name for ore {ore_id}: {e}")
+        return "Unknown"
+
+    # Update cache
+    updated = False
+    for ore in cache["ore_type"]:
+        if ore["id"] == ore_id:
+            ore["name"] = name
+            ore["last_updated"] = today.isoformat()
+            updated = True
+            break
+    if not updated:
+        cache["ore_type"].append({
+            "id": ore_id,
+            "name": name,
+            "last_updated": today.isoformat()
+        })
+
+    # Write back to cache file immediately
+    save_cache(cache, cache_file)
 
     return name
 
 # Function - Get Character Name from Cache
-def get_character_name_from_cache(character_id, cache_file="cache.json"):
+def get_character_name_from_cache(character_id, headers, cache_file="cache.json"):
+    print(f"Look up Character: {character_id}")
     cache = load_cache(cache_file)
     # Search for the character name in cache
     for char in cache["characters"]:
         if char["id"] == character_id:
+            print(f"Character {character_id} found in cache as {char["name"]}")
             return char["name"]
-    return None  # Return None if character is not found in cache
+    print(f"Character {character_id} not found in cache - looking up via ESI")
+    return get_character_name(character_id, headers)
+
+# Function - Get Ore Name from Cache
+def get_ore_name_from_cache(type_id, headers, cache_file="cache.json"):
+    print(f"Look up Ore: {type_id}")
+    cache = load_cache(cache_file)
+    # Search for the ore name in cache
+    for ore in cache.get("ore_type", []):
+        if ore["id"] == type_id:
+            print(f"Ore {type_id} found in cache as {ore["name"]}")
+            return ore["name"]
+    print(f"Ore {type_id} not found in cache - looking up via ESI")
+    return get_ore_name(type_id, headers)
 
 
 ## MAIN CODE
@@ -303,21 +358,32 @@ for entry in all_entries:
     if from_dt <= last_updated <= to_dt:
         filtered_entries.append(entry)
 
-# Step 3: Aggregate quantity by character name and type_id
+# Step 3: Aggregate quantity by character name and ore name
 aggregated = {}
 for entry in filtered_entries:
-    # Get character name from cache
-    character_name = get_character_name_from_cache(entry['character_id'])
-    
-    if character_name:  # Proceed only if character name is found
-        # Use character name as the key in aggregation
-        key = (character_name, entry['type_id'])
+    # Get character and ore names from cache
+    character_name = get_character_name_from_cache(entry['character_id'], headers)
+    ore_name = get_ore_name_from_cache(entry['type_id'], headers)
+
+    if character_name and ore_name:
+        # Use character name and ore name as the key in aggregation
+        key = (character_name, ore_name)
         aggregated[key] = aggregated.get(key, 0) + entry['quantity']
     else:
-        print(f"❌ Character ID {entry['character_id']} not found in cache")
+        if not character_name:
+            print(f"❌ Character ID {entry['character_id']} not found in cache")
+        if not ore_name:
+            print(f"❌ Ore type ID {entry['type_id']} not found in cache")
 
 # Output results
 print(aggregated)
+
+with open(f"eve_mining_{to_date}_{from_date}", "w", newline="") as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(["Character", "Ore Type", "Amount"])
+
+    for (character, ore), amount in sorted(aggregated.items(), key=lambda x: (x[0][0], x[0][1])):
+        writer.writerow([character, ore, amount])
 
 # Format and output
 #output = [{"pilot_name": p, "mined_ores": ores} for p, ores in pilot_data.items()]
