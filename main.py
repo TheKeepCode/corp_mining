@@ -326,22 +326,20 @@ all_entries = []
 for obs in observers:
     observer_id = obs['observer_id']
     print(f"DEBUG - Reading data from Observer {observer_id}")
-    page = 1
+    after = None
     while True:
         obs_url = f"{ESI_BASE}/corporation/{corp_id}/mining/observers/{observer_id}/"
         params = {
-            "page": page,
             "datasource": "tranquility"
         }
+        if after:
+            params["after"] = after
         resp = requests.get(obs_url, headers=headers, params=params)
         time.sleep(0.34)  # Limit of 3 requests/sec
 
-        if resp.status_code == 500 and "Requested page does not exist" in resp.text:
-            # Treat this as a 404 - CCP seems to throw this for some reason when there are no more pages of data for a particular observer
-            break
-        elif resp.status_code != 200:
-            print(f"ERROR {resp.status_code} on observer {observer_id}, page {page}")
-            print(f"{resp.text}")
+        if resp.status_code != 200:
+            print(f"ERROR {resp.status_code} on observer {observer_id}")
+            print(resp.text)
             break
 
         entries = resp.json()
@@ -349,7 +347,10 @@ for obs in observers:
             break
 
         all_entries.extend(entries)
-        page += 1
+
+        after = resp.headers.get("X-Pagination-After")
+        if not after:
+            break
 
 # Step 2: Filter entries based on last_updated (Only count the ores mined by characters during the specified time period)
 filtered_entries = []
